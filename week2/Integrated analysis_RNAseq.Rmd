@@ -1,0 +1,551 @@
+---
+title: "Integrated Analysis of GSE198256: From Data Preparation to Gene Set Enrichment"
+author: "David Gomez-Cabrero"
+date: "2024-January"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This document presents an integrated pipeline for the analysis of the GSE198256 dataset, focusing on COVID-19. The analysis covers data loading, quality control (QC), normalization, differential expression analysis, and gene set enrichment analysis (GSEA), streamlining the process into a coherent workflow. After evaluating various tools, I've selected specific methods for each step to optimize accuracy, efficiency, and interpretability.
+
+## Data Loading and Preparation
+
+```{r load-data}
+library(data.table)
+library(GEOquery)
+
+# Define URL and path for the data
+urld <- "https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts"
+path <- paste(urld, "acc=GSE198256", "file=GSE198256_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep="&");
+GSE198256_count <- as.matrix(data.table::fread(path, header=T, colClasses="integer"), rownames=1)
+
+## WE NEED BIOLOGICAL INFORMATION: GC, GENE LENGTH, CHROMOSOME,...
+
+## Write the names
+write.table(rownames(GSE198256_count),"gene_names.entrez.txt",
+            col.names = FALSE,row.names = FALSE,quote=F)
+
+## Additional Biological information: https://www.ensembl.org/biomart/martview/7f2a95d66853c3b8aea7639401e47aba
+
+annotgene <- read.csv("mart_export.txt",sep="\t",header = T) # Import the information
+sum(rownames(GSE198256_count) %in% annotgene$Entrezgene) # How many genes do I get annotated?
+head(GSE198256_count)
+
+# Filter the information
+annotgene <- annotgene[annotgene$Chromosome %in% c(as.character(1:22) ,"X","Y"),]
+sum(rownames(GSE198256_count) %in% annotgene$Entrezgene)
+
+## Annotation... solving some issues...
+rownames(annotgene) <- annotgene$Entrezgene
+annotgene[annotgene$Entrezgene=="132989",]
+
+annotgene_filt <- annotgene[!duplicated(annotgene$Entrezgene),]
+sum(rownames(GSE198256_count) %in% annotgene$Entrezgene)
+sum(annotgene_filt$Entrezgene %in% rownames(GSE198256_count))
+annotgene_filt[annotgene_filt$Entrezgene=="132989",]
+
+## Overlap between annotation and genes
+rownames(annotgene_filt) <- as.character(annotgene_filt$Entrezgene)
+sum(as.character(rownames(annotgene_filt)) %in% rownames(GSE198256_count))
+
+##  Work with the annotated genes!
+GSE198256_count_filt <- GSE198256_count[rownames(GSE198256_count) %in% rownames(annotgene_filt),]
+GSE198256_count_exc <-GSE198256_count[!(rownames(GSE198256_count) %in% rownames(annotgene_filt)),]
+annotgene_ord <- annotgene_filt[rownames(GSE198256_count_filt ),]
+
+sum(rownames(annotgene_ord)==rownames(GSE198256_count_filt))
+  
+## READY
+GSE198256_count_filt
+annotgene_ord
+Factors_GSE198256
+```
+
+## Quality Control
+
+```{r quality-control}
+Factors_GSE198256 <- data.frame(Meta_GSE198256 [ colnames(GSE198256_count_filt),c("disease state:ch1")])
+colnames(Factors_GSE198256)[1]<- "Group"
+
+data_NOISEQ <- readData(data = GSE198256_count_filt,
+                        length=abs(annotgene_ord$end-annotgene_ord$start),
+                        gc=annotgene_ord$GC,
+                        biotype= annotgene_ord$type ,
+                        chromosome = annotgene_ord[,c("Chromosome","start","end")],
+                        factors = Factors_GSE198256)
+
+myexplodata <- dat(data_NOISEQ, type = "countsbio")
+explo.plot(myexplodata, plottype = "boxplot")
+mynicedata <- dat2save(myexplodata)
+mybiodetection <- dat(data_NOISEQ, k = 0, type = "countsbio", factor = NULL)
+
+lengthuse <- abs(annotgene_ord$end-annotgene_ord$start)
+names(lengthuse) <- rownames(annotgene_ord)
+gc <- annotgene_ord$GC
+names(gc) <- rownames(annotgene_ord)
+biotype <-annotgene_ord$type
+names(biotype) <- rownames(annotgene_ord)
+
+chromosome <- annotgene_ord[,c("Chromosome","start","end")]
+
+
+data_NOISEQ <- readData(data = GSE198256_count_filt,
+                        length=lengthuse,
+                        gc=gc,
+                        biotype= biotype ,
+                        chromosome = annotgene_ord[,c("Chromosome","start","end")],
+                        factors = Factors_GSE198256)
+
+myexplodata <- dat(data_NOISEQ, type = "biodetection")
+explo.plot(myexplodata, plottype = "persample")
+
+par(mfrow = c(1, 2))
+explo.plot(myexplodata, samples = c(1, 2), toplot = "protein_coding", plottype = "comparison")
+
+
+mycountsbio = dat(data_NOISEQ, factor = NULL, type = "countsbio")
+explo.plot(mycountsbio, toplot = 1, samples = 1, plottype = "boxplot")
+
+mysaturation = dat(data_NOISEQ, k = 0, ndepth = 7, type = "saturation")
+explo.plot(mysaturation, toplot = 1, samples = 1:2, yleftlim = NULL, yrightlim = NULL)
+explo.plot(mysaturation, toplot = "protein_coding", samples = 1:4)
+
+explo.plot(mycountsbio, toplot = "protein_coding", samples = NULL, plottype = "boxplot")
+
+explo.plot(mycountsbio, toplot = 1, samples = NULL, plottype = "barplot")
+
+mylengthbias = dat(data_NOISEQ, factor = "Group", type = "lengthbias")
+explo.plot(mylengthbias, samples = NULL, toplot = "global")
+
+myGCbias = dat(data_NOISEQ, factor = "Group", type = "GCbias")
+explo.plot(myGCbias, samples = NULL, toplot = "global")
+
+mycd = dat(data_NOISEQ, type = "cd", norm = FALSE, refColumn = 1)
+explo.plot(mycd,samples = 1:12)
+
+myPCA = dat(data_NOISEQ, type = "PCA")
+explo.plot(myPCA, factor = "Group")
+
+QCreport(data_NOISEQ, samples = NULL, factor = "Group", norm = FALSE)
+
+save(data_NOISEQ,GSE198256_count_filt,annotgene_ord,file="GSE198256_step1.Rda")
+```
+
+## Normalization and Differential Expression Analysis
+
+I choose `DESeq2` for differential expression analysis due to its statistical rigor, ability to handle biological variance, and comprehensive support for RNA-seq data. `DESeq2` provides methods for controlling for batch effects, assessing differential expression, and it's widely accepted in the community.
+
+```{r deseq2-analysis}
+
+library(DESeq2)
+load("GSE198256_step1.Rda") # data_NOISEQ,GSE198256_count_filt,annotgene_ord,file="GSE198256_step1.Rda")
+
+# STEP 3.1.1: SET THE CLASS
+GSE198256_DESeq2 <- DESeqDataSetFromMatrix(countData = GSE198256_count_filt,
+                              colData = pData(data_NOISEQ),
+                              design = ~ Group)
+# Warning
+pDataUSE <- pData(data_NOISEQ)
+pDataUSE[pDataUSE=="Covid19: Acute infection"] <- "Covid19AI"
+pDataUSE[pDataUSE=="Covid19: Recovery 3Mo"] <- "Covid193Mo"
+pDataUSE[pDataUSE=="Covid19: Recovery 6Mo"] <- "Covid196Mo"
+pDataUSE[,1] <- as.factor(pDataUSE[,1])
+
+GSE198256_DESeq2 <- DESeqDataSetFromMatrix(countData = GSE198256_count_filt,
+                                           colData = pDataUSE,
+                                           design = ~ -1 + Group)
+resultsNames(GSE198256_DESeq2)
+GSE198256_DESeq2 <- DESeqDataSetFromMatrix(countData = GSE198256_count_filt,
+                                           colData = pDataUSE,
+                                           design = ~ Group)
+
+# STEP 3.1.2: WITH WHICH GENES TO WORK?
+smallestGroupSize <- 6
+keep <- rowSums(counts(GSE198256_DESeq2) >= 10) >= smallestGroupSize
+GSE198256_DESeq2_F <- GSE198256_DESeq2[keep,]
+
+# STEP 3.1.3: DIFFERENTIAL EXPRESSION?
+GSE198256_DESeq2_F<- DESeq(GSE198256_DESeq2_F)
+GSE198256_res <- results(GSE198256_DESeq2_F)
+GSE198256_res
+resultsNames(GSE198256_DESeq2_F)
+
+# STEP 3.1.4: WE NEED TO UNDERSTAND MORE...
+
+## Questions in my mind:
+# How do I define the question?
+# How the differential expression is done?
+# How to interpret the results?
+# Technical replicates?
+
+## STEP 3.1.4: plot MA
+
+library(limma)
+plotMA(GSE198256_res, ylim=c(-2,2))
+lfcShrink(GSE198256_DESeq2_F,coef=c("Group_Healthy_vs_Covid193Mo"))
+res_lfcShrink <- lfcShrink(GSE198256_DESeq2_F,coef=c("Group_Covid196Mo_vs_Covid193Mo"))
+
+plotMA(res_lfcShrink, ylim=c(-2,2))
+
+## STEP 3.1.4: Define questions
+
+GSE198256_DESeq2_F<- DESeq(GSE198256_DESeq2_F)
+#res <- results(GSE198256_DESeq2_F, contrast=c('factorName','numeratorLevel','denominatorLevel'))
+res <- results(GSE198256_DESeq2_F, contrast=c("Group","Healthy","Covid19AI"))
+res
+resultsNames(GSE198256_DESeq2_F)
+
+
+## STEP 3.1.5: How differential expression is conducted...
+
+# DESeq2 offers two kinds of hypothesis tests: 
+#   the Wald test, 
+#        where we use the estimated standard error of a log2 fold 
+#        change to test if it is equal to zero, 
+#   the likelihood ratio test (LRT). 
+#        The LRT examines two models for the counts, a full model 
+#        with a certain number of terms and a reduced model, in 
+#        which some of the terms of the full model are removed. 
+#        The test determines if the increased likelihood of the 
+#        data using the extra terms in the full model is more 
+#        than expected if those extra terms are truly zero.
+
+GSE198256_DESeq2_F <- DESeq(GSE198256_DESeq2_F, test="LRT", reduced=~1)
+GSE198256_DESeq2_res_LRT <- results(GSE198256_DESeq2_F)
+GSE198256_DESeq2_res_LRT
+res <- results(GSE198256_DESeq2_res_LRT)
+
+
+plotCounts(GSE198256_DESeq2_F, gene="100287102", intgroup="Group")
+
+
+# How do we visualize?
+vsd <- vst(GSE198256_DESeq2_F, blind=FALSE)
+rld <- rlog(GSE198256_DESeq2_F, blind=FALSE)
+head(assay(vsd), 3)
+
+# heatmap
+library("pheatmap")
+select <- order(rowMeans(counts(GSE198256_DESeq2_F,normalized=TRUE)),
+                decreasing=TRUE)[1:20]
+df <- as.data.frame(colData(GSE198256_DESeq2_F)[,c("Group")])
+colnames(df) <- "Group"
+
+pheatmap(assay(vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE)
+
+# PCA
+plotPCA(vsd, intgroup=c("Group"))
+```
+
+## Gene Set Enrichment Analysis
+
+For GSEA, I use `clusterProfiler`, which integrates well with `DESeq2` and offers robust methods for testing and visualizing enrichment across gene sets, leveraging databases like MSigDB and KEGG with ease.
+
+```{r gsea}
+library(clusterProfiler)
+library(enrichplot)
+
+# Step 1: determine genes of interest.
+diff_table_all <- topTable(fit2,coef=1,p.value=1,number=nrow(logCPM)) 
+
+# Step 2: determine background.
+
+# Step 3: Determine gene sets.
+
+msigdbr_species()
+hs_msigdb_df <- msigdbr(species = "Homo sapiens")
+head(hs_msigdb_df)
+
+hs_kegg_df <- hs_msigdb_df %>%
+  dplyr::filter(
+    gs_cat == "C2", # This is to filter only to the C2 curated gene sets
+    gs_subcat == "CP:KEGG" # This is because we only want KEGG pathways
+  )
+
+# Step 4: conduct GSEA
+
+list_ordered <- diff_table_all[,"B"]
+names(list_ordered) <- rownames(diff_table_all)
+  
+set.seed(123)
+
+gsea_results <- GSEA(
+  geneList = list_ordered, # Ordered ranked gene list
+  minGSSize = 25, # Minimum gene set size
+  maxGSSize = 500, # Maximum gene set set
+  pvalueCutoff = 0.05, # p-value cutoff
+  eps = 0, # Boundary for calculating the p value #seed = 123, # Set seed to make results reproducible
+  pAdjustMethod = "BH", # Benjamini-Hochberg correction
+  TERM2GENE = dplyr::select(
+    hs_kegg_df,
+    gs_name,
+    human_entrez_gene
+  )
+)
+
+# Step 5: Visualize / explore
+head(gsea_results@result)
+
+gsea_result_df <- data.frame(gsea_results@result)
+gsea_result_df %>%
+  # This returns the 3 rows with the largest NES values
+  dplyr::slice_max(NES, n = 3)
+
+most_positive_nes_plot <- enrichplot::gseaplot(
+  gsea_results,
+  geneSetID = "KEGG_JAK_STAT_SIGNALING_PATHWAY",
+  title = "KEGG_JAK_STAT_SIGNALING_PATHWAY",
+  color.line = "#0d76ff"
+)
+most_positive_nes_plot
+
+gsea_result_df %>%
+  # Return the 3 rows with the smallest (most negative) NES values
+  dplyr::slice_min(NES, n = 3)
+
+most_negative_nes_plot <- enrichplot::gseaplot(
+  gsea_results,
+  geneSetID = "KEGG_SPLICEOSOME",
+  title = "KEGG_SPLICEOSOME",
+  color.line = "#0d76ff"
+)
+most_negative_nes_plot
+
+
+
+# Step 6: EXERCISE: alternatives to KEGG?
+
+# Step 7: EXERCISE: compare GSEA vs ORA?
+
+# ORA looks at over-representation of significant genes within pathways, whereas GSEA considers the entire ranked list of genes to determine whether a set is statistically overrepresented at the top or bottom of the list.
+install.packages("VennDiagram")
+library(VennDiagram)
+
+list_of_pathways <- list(ORA = kegg_ora_results$Description, GSEA = gsea_results@result$Description)
+
+venn.plot <- venn.diagram(list_of_pathways, filename = NULL)
+grid.draw(venn.plot)
+
+common_pathways <- intersect(kegg_ora_results$Description, gsea_results@result$Description)
+print(common_pathways)
+```
+
+## GeneSetCluster
+
+**`GeneSetCluster`** is chosen for its innovative clustering approach to GSEA results, which is pivotal for dissecting and understanding the complex landscape of pathway enrichments. Its ability to handle extensive gene set collections and provide detailed insights into specific clusters makes it an invaluable tool for our analysis, offering a clear path from broad patterns to detailed pathway investigations.
+
+```{r prepare GSEA}
+# Healthy vs Group Covid19 
+# We prepare a function from the previous analysis
+
+# Healthy vs Covid19AI 
+Diff_HvsAI <- topTable(fit2,coef=1,p.value=1,number=nrow(logCPM))
+# Healthy vs Covid196Mo 
+Diff_Hvs6Mo <- topTable(fit2,coef=3,p.value=1,number=nrow(logCPM))
+
+
+hs_msigdb_df <- msigdbr(species = "Homo sapiens")
+hs_kegg_df <- hs_msigdb_df %>%
+  dplyr::filter(
+    gs_cat == "C2", # This is to filter only to the C2 curated gene sets
+    gs_subcat == "CP:KEGG" # This is because we only want KEGG pathways
+  )
+
+
+doGSEA <- function(diff_table) {
+  list_ordered <- diff_table[,"B"]
+  names(list_ordered) <- rownames(diff_table)
+  
+  return(GSEA(
+    geneList = list_ordered, # Ordered ranked gene list
+    minGSSize = 25, # Minimum gene set size
+    maxGSSize = 500, # Maximum gene set set
+    pvalueCutoff = 0.05, # p-value cutoff
+    eps = 0, # Boundary for calculating the p value
+    seed = TRUE, # Set seed to make results reproducible
+    pAdjustMethod = "BH", # Benjamini-Hochberg correction
+    TERM2GENE = dplyr::select(
+      hs_kegg_df,
+      gs_name,
+      human_entrez_gene
+    )
+  ))
+}
+
+GSEA_HvsAI <- doGSEA(Diff_HvsAI)
+GSEA_Hvs6Mo <- doGSEA(Diff_Hvs6Mo)
+
+path <- "/Users/velazqal/Documents/00_Bioinformatic pipelines"
+
+write.csv(GSEA_HvsAI, file = paste0(path, "/GSEA_HvsAI.csv"), row.names = FALSE)
+write.csv(GSEA_Hvs6Mo, file = paste0(path, "/GSEA_Hvs6Mo.csv"), row.names = FALSE)
+```
+
+```{r run GeneSetCluster}
+library(GeneSetCluster)
+GSEA.files <- paste0(path, "/", list.files(path, pattern = ".csv"))
+
+# Load the data and create Pathway object
+# Automatically for GSEA, GREAT or IPA
+GSEA.Object1 <- LoadGeneSets(file_location = GSEA.files, 
+                              groupnames= c("GSEA_Hvs6Mo", "GSEA_HvsAI"), # names of the groups
+                              P.cutoff = 0.05, # cut off the p.adjust
+                              Mol.cutoff = 15, # minimum number of genes per pathway
+                              Source = "GSEA", # the analysis (GSEA, GREAT or IPA)
+                              structure = "ENTREZID", # Gene type (SYMBOL, ENTREZID, ENSEMBLID)
+                              Organism = "org.Hs.eg.db", # database: Homo Sapiens or Mus musculus
+                              seperator = "/") # the separator used for listing genes
+
+# IMPORTANT when created manually, it is assumed that the pathways have been filtered by p-value and minimum number of genes per pathway
+# Make sure you have filtered your data
+GSEA.Object1Manual <- ObjectCreator(Pathways = c(GSEA_HvsAI@result$ID, 
+                                                 GSEA_Hvs6Mo@result$ID),
+                                    Molecules = c(GSEA_HvsAI@result$core_enrichment, 
+                                                  GSEA_Hvs6Mo@result$core_enrichment),
+                                    Groups = c(rep("GSEA_HvsAI", times=nrow(GSEA_HvsAI@result)), 
+                                               rep("GSEA_Hvs6Mo", times=nrow(GSEA_Hvs6Mo@result))),
+                                    Pvalues = c(GSEA_HvsAI@result$p.adjust,  # optional
+                                                GSEA_Hvs6Mo@result$p.adjust),
+                                    enrichmentScore = c(GSEA_HvsAI@result$NES, # optional
+                                                        GSEA_Hvs6Mo@result$NES), 
+                                    structure = "ENTREZID", Type = "", sep = "/",
+                                    Source = "GSEA", organism = "org.Hs.eg.db")
+
+GSEA.Object2 <- CombineGeneSets(Object = GSEA.Object1,
+                                combineMethod = "Standard", threads = 8)
+
+
+OptimalGeneSets(Object = GSEA.Object2, 
+                uniquePathway = FALSE, # consider all the pathways (also repeated) or the unique pathways
+                method = "silhouette", max_cluster= 24, cluster_method = "kmeans", main= "Kmeans for 24 clusters")
+
+OptimalGeneSets(Object = GSEA.Object2, 
+                uniquePathway = TRUE, # consider all the pathways (also repeated) or the unique pathways
+                method = "silhouette", max_cluster= 24, cluster_method = "kmeans", main= "Kmeans for 24 clusters")
+# in both cases the optimal cluster is 2
+
+GSEA.Object3 <- ClusterGeneSets(Object = GSEA.Object2, 
+                                clusters = 2, # consider all the pathways (also repeated) or the unique pathways
+                                method = "Hierarchical", # Hierarchical clustering or kmeans
+                                order = "cluster",
+                                molecular.signature = "All")
+
+# plot results for both all pathways and unique pathways
+plotnounique <- PlotGeneSets(GSEA.Object3, 
+                             uniquePathways = FALSE, 
+                             wordcloud = FALSE, # wordcloud only supported for GO terms
+                             doORA = T) # do ora per cluster
+
+plotunique <- PlotGeneSets(GSEA.Object3, 
+                           uniquePathways = TRUE, 
+                           wordcloud = FALSE, # wordcloud only supported for GO terms
+                           doORA = T) # do ora per cluster
+
+
+# let's say we are interested in exploring cluster 2 in plotunique. Lets break up this cluste for further analysis 
+
+plotoptimalcluster2 <- OptimalGeneSets(Object = GSEA.Object3, 
+                uniquePathway = TRUE, # consider all the pathways (also repeated) or the unique pathways
+                cluster = 2, # which cluster
+                method = "silhouette", max_cluster= 24, cluster_method = "kmeans", main= "Kmeans for 24 clusters in cluster 1")
+
+plotoptimalcluster2 # optimal 2 break up cluster 2 in 2 clusters
+
+GSEA.Object3breakup <- BreakUpCluster(GSEA.Object3, 
+                                      breakup.cluster = 2, # which cluster
+                                      sub.cluster = 2, # in how many cluster split up
+                                      uniquePathways = TRUE) # conside unique pathways
+
+plotuniquebreakup <- PlotGeneSets(GSEA.Object3breakup, 
+                                  uniquePathways = TRUE, 
+                                  wordcloud = FALSE, # wordcloud only supported for GO terms
+                                  doORA = T) # do ora per cluster
+
+plotuniquebreakup
+
+# Now break up the cluster 1 
+plotoptimalcluster1 <- OptimalGeneSets(Object = GSEA.Object3, 
+                uniquePathway = TRUE, # consider all the pathways (also repeated) or the unique pathways
+                cluster = 1, # which cluster
+                method = "silhouette", max_cluster= 24, cluster_method = "kmeans", main= "Kmeans for 24 clusters in cluster 1")
+
+plotoptimalcluster1 # optimal 1 break up cluster 1 in 9 clusters
+
+GSEA.Object3breakup2 <- BreakUpCluster(GSEA.Object3breakup, 
+                                      breakup.cluster = 1, # which cluster
+                                      sub.cluster = 9, # in how many cluster split up
+                                      uniquePathways = TRUE) # conside unique pathways
+
+plotuniquebreakup2 <- PlotGeneSets(GSEA.Object3breakup2, 
+                                   uniquePathways = TRUE, 
+                                   wordcloud = FALSE, # wordcloud only supported for GO terms
+                                   doORA = T) # do ora per cluster
+
+plotuniquebreakup2
+
+
+```
+
+```{r explore results}
+# plot results for both all pathways and unique pathways
+plotnounique <- PlotGeneSets(GSEA.Object3, 
+                             uniquePathways = FALSE, 
+                             wordcloud = FALSE, # wordcloud only supported for GO terms
+                             doORA = T) # do ora per cluster
+
+plotunique <- PlotGeneSets(GSEA.Object3, 
+                           uniquePathways = TRUE, 
+                           wordcloud = FALSE, # wordcloud only supported for GO terms
+                           doORA = T) # do ora per cluster
+
+
+# let's say we are interested in exploring cluster 2 in plotunique. Lets break up this cluste for further analysis 
+
+plotoptimalcluster2 <- OptimalGeneSets(Object = GSEA.Object3, 
+                uniquePathway = TRUE, # consider all the pathways (also repeated) or the unique pathways
+                cluster = 2, # which cluster
+                method = "silhouette", max_cluster= 24, cluster_method = "kmeans", main= "Kmeans for 24 clusters in cluster 1")
+
+plotoptimalcluster2 # optimal 2 break up cluster 2 in 2 clusters
+
+GSEA.Object3breakup <- BreakUpCluster(GSEA.Object3, 
+                                      breakup.cluster = 2, # which cluster
+                                      sub.cluster = 2, # in how many cluster split up
+                                      uniquePathways = TRUE) # conside unique pathways
+
+plotuniquebreakup <- PlotGeneSets(GSEA.Object3breakup, 
+                                  uniquePathways = TRUE, 
+                                  wordcloud = FALSE, # wordcloud only supported for GO terms
+                                  doORA = T) # do ora per cluster
+
+plotuniquebreakup
+
+# Now break up the cluster 1 
+plotoptimalcluster1 <- OptimalGeneSets(Object = GSEA.Object3, 
+                uniquePathway = TRUE, # consider all the pathways (also repeated) or the unique pathways
+                cluster = 1, # which cluster
+                method = "silhouette", max_cluster= 24, cluster_method = "kmeans", main= "Kmeans for 24 clusters in cluster 1")
+
+plotoptimalcluster1 # optimal 1 break up cluster 1 in 9 clusters
+
+GSEA.Object3breakup2 <- BreakUpCluster(GSEA.Object3breakup, 
+                                      breakup.cluster = 1, # which cluster
+                                      sub.cluster = 9, # in how many cluster split up
+                                      uniquePathways = TRUE) # conside unique pathways
+
+plotuniquebreakup2 <- PlotGeneSets(GSEA.Object3breakup2, 
+                                   uniquePathways = TRUE, 
+                                   wordcloud = FALSE, # wordcloud only supported for GO terms
+                                   doORA = T) # do ora per cluster
+
+plotuniquebreakup2
+
+```

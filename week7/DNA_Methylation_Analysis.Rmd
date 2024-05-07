@@ -1,0 +1,378 @@
+---
+title: "Week 7 assignment: DNA Methylation Analysis"
+author: "Alejandra Lopez & Kelly J. Cardona"
+date: "28/4/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Excercise - DNA Methylation Analysis
+
+This report contains the results of the DNA-methylation analysis in the data reported in Godoy-Tena et al, 2022 (https://pubmed.ncbi.nlm.nih.gov/36443794/) using and modifying the tutorial on (https://www.bioconductor.org/packages/devel/workflows/vignettes/methylationArrayAnalysis/inst/doc/methylationArrayAnalysis.html) provided by Prof. Gomez-Cabrero during the seventh class on March, 2024. 
+
+## 0. Loading packages required for the analysis
+```{r load_packages, echo=FALSE}
+
+library(knitr)
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(RColorBrewer)
+library(missMethyl)
+library(minfiData)
+library(Gviz)
+library(DMRcate)
+library(stringr)
+library(GEOquery)
+library(minfi)
+```
+## 1. Obtaining the Data
+
+The data to analyze in this exercise is available in GEO repository under the accession GSE188573. The dataset consist of samples of Monocytes from 48 severe COVID19 patients and 11 healthy donors.
+
+```{r retrieve data}
+# Download supplementary files for GSE188573
+#suppFiles <- getGEOSuppFiles("GSE188573")
+# Check the contents of the downloaded files
+list.files("GSE188573")
+#extract and locate IDAT files
+#I did it on the terminal by doing tar -xf GSE188573_RAW.tar
+```
+
+## 2. Creating a Proper metadata file
+
+Since we obtained IDAT files, we will use minfi for preprocessing. minfi requires certain information to upload the data into R, which includes: 
+Sample_Name: A unique name for each sample.
+Sentrix_ID: The ID of the chip (often the first part of the file name of the IDAT files).
+Sentrix_Position: The position on the chip (often the second part of the file name of the IDAT files).
+
+So, lets create a metadatafile containing this required columns.
+
+```{r create meta}
+#Creating the metadata file from the SOFT file I downloaded manually
+# Replace 'path_to_file' with the actual path to your SOFT file
+soft_lines <- readLines("./GSE188573/GSE188573_family.soft")
+
+# Identify indices of lines that start new sections
+sample_indices <- grep("^\\^SAMPLE", soft_lines)
+sample_indices <- c(sample_indices, length(soft_lines) + 1)  # Include the end for the last sample
+
+samples_list <- lapply(1:(length(sample_indices) - 1), function(i) {
+    sample_lines <- soft_lines[sample_indices[i]:(sample_indices[i+1]-1)]
+    sample_id <- sub("^\\^SAMPLE = ", "", soft_lines[sample_indices[i]])
+    sample_title <- sub("^!Sample_title = ", "", sample_lines[grep("^!Sample_title =", sample_lines)])
+    
+    # Extract IDAT path
+    idat_path_line <- grep("^!Sample_supplementary_file =", sample_lines, value = TRUE)
+    if (length(idat_path_line) > 0) {
+        idat_path <- sub("^!Sample_supplementary_file = ", "", idat_path_line)
+        idat_filename <- basename(idat_path)
+        sentrix_info <- strsplit(idat_filename, "_")[[1]]
+        if (length(sentrix_info) >= 3) {
+            sentrix_id <- sentrix_info[1]
+            sentrix_position <- sentrix_info[2]
+        } else {
+            sentrix_id <- NA
+            sentrix_position <- NA
+        }
+    } else {
+        sentrix_id <- NA
+        sentrix_position <- NA
+    }
+
+    # Extract additional metadata
+    characteristics <- sample_lines[grep("^!Sample_characteristics_ch1 =", sample_lines)]
+    gender <- ifelse(any(grepl("gender:", characteristics)), sub(".*gender: ", "", characteristics[grep("gender:", characteristics)]), NA)
+    age <- ifelse(any(grepl("age:", characteristics)), sub(".*age: ", "", characteristics[grep("age:", characteristics)]), NA)
+    group <- ifelse(any(grepl("^!Sample_source_name_ch1 =", sample_lines)), sub("^!Sample_source_name_ch1 = ", "", sample_lines[grep("^!Sample_source_name_ch1 =", sample_lines)]), NA)
+
+    # Return all metadata as a list
+    list(
+        Sample_ID = sample_id,
+        Sample_Title = sample_title,
+        Sentrix_ID = sentrix_id,
+        Sentrix_Position = sentrix_position,
+        Gender = gender,
+        Age = age,
+        Group = group
+    )
+})
+
+# Convert list of samples into a data frame for easier handling
+sample_metadata <- do.call(rbind, lapply(samples_list, function(x) as.data.frame(x, stringsAsFactors = FALSE)))
+
+# Print the structure of the first few entries to verify
+print(head(sample_metadata))
+
+#write.csv(sample_metadata, "./GSE188573/metadata_GSE188573.csv", row.names = FALSE)
+
+```
+
+# loading the data with minfi
+
+```{r loading data}
+#Loading the data on R. 
+baseDir <- "./GSE188573/IDAT_files"
+
+# targets file specifies the metadata for each sample
+#targets <- read.csv("./GSE188573/metadata_GSE188573.csv")
+
+# Reading IDAT files
+#rgSet <- read.metharray.exp(targets = targets, base = baseDir)
+#rgSet
+#Error in read.metharray.exp(targets = targets, base = baseDir) : 
+# Need 'Basename' amongst the column names of 'targets'
+
+##correcting the metadata to have a 'Basename'
+#targets$Basename <- paste(targets$Sentrix_ID, targets$Sentrix_Position, sep = "_")
+#write.csv(targets, "./GSE188573/meta_GSE188573.csv", row.names = FALSE)
+
+#Retry loading the IDAT files
+targets_good <- read.csv("./GSE188573/meta_GSE188573.csv")
+rgSet <- read.metharray.exp(targets = targets_good, base = baseDir)
+rgSet
+
+## give the samples descriptive names
+targets_good$ID <- paste(targets_good$Group,targets_good$Sample_ID,sep=".")
+sampleNames(rgSet) <- targets_good$ID
+rgSet
+```
+
+## 3. Quality Control 
+
+Once the data has been imported into R, we can evaluate its quality. Firstly, we need to calculate detection p-values. We can generate a detection p-value for every CpG in every sample, which is indicative of the quality of the signal. The method used by minfi to calculate detection p-values compares the total signal (M+U) for each probe to the background signal level, which is estimated from the negative control probes. Very small p-values are indicative of a reliable signal whilst large p-values, for example >0.01, generally indicate a poor quality signal.
+
+```{r QC}
+
+# calculate the detection p-values
+detP <- detectionP(rgSet)
+head(detP)
+
+
+## examine mean detection p-values across all samples to identify any failed samples
+#png("./GSE188573/figures/barplot_pvalues.png", width = 800, height = 400)  
+pal <- brewer.pal(8,"Dark2")
+barplot(colMeans(detP), col=pal[factor(targets_good$Group)], las=2, 
+        cex.names=0.6, ylim=c(0,0.0006), ylab="Mean detection p-values")
+#abline(h=0.05,col="red")
+legend("topleft", legend=levels(factor(targets_good$Group)), fill=pal,
+       bg="white")
+#dev.off()
+```
+
+From the plot above we can observe that all our samples look good based on the mean detection p-value since all of them are in the significance threshold, mean detection p-value < 0.05. 
+The next step is to complement this observation with the minfi qcReport function whcih generates many other useful quality control plots. 
+
+```{r generate_qc_report}
+
+qcReport(rgSet, sampNames=targets_good$ID, sampGroups=targets_good$Group, 
+         pdf="./GSE188573/qcReport_GSE188573.pdf")
+```
+## 4. Normalization
+
+Normalization is performed to adjust for technical variability and other confounding factors, making the true biological differences more apparent. As we are comparing the same cell type under two condition, we will apply the preprocessQuantile method. This function implements a stratified quantile normalisation procedure which is applied to the methylated and unmethylated signal intensities separately, and takes into account the different probe types.
+
+```{r normalization}
+# normalize the data; this results in a GenomicRatioSet object
+mSetSq <- preprocessQuantile(rgSet) 
+# create a MethylSet object from the raw data for plotting
+mSetRaw <- preprocessRaw(rgSet)
+
+# visualise what the data looks like before and after normalization
+#png("./GSE188573/figures/density_plot_normalization.png", width = 800, height = 400) 
+par(mfrow=c(1,2))
+densityPlot(rgSet, sampGroups=targets_good$Group,main="Raw", legend=FALSE)
+legend("top", legend = levels(factor(targets_good$Group)), 
+       text.col=brewer.pal(8,"Dark2"))
+densityPlot(getBeta(mSetSq), sampGroups=targets_good$Group,
+            main="Normalized", legend=FALSE)
+legend("top", legend = levels(factor(targets_good$Group)), 
+       text.col=brewer.pal(8,"Dark2"))
+
+#dev.off()
+```
+
+In the previous plots we observe the probability density of beta values for the two groups. Both groups show a bimodal distribution, which is typical in methylation data. There are two peaks close to 0 and 1, indicating that most CpG sites are either largely unmethylated (0) or highly methylated (1).The bimodal distribution is retained after normalization, but in the normalized data the peaks are tighter than in the no normalized, which is an indication of less variance. Importantly, the fact that the density curves of COVID19 patients and Healthy Donors largely overlap suggests that there may not be drastic global methylation differences between these groups.However, we need to perform deeper analysis to reveal weather there are or not differentially methylated regions. 
+
+## 5. Data Exploration 
+
+Multi-dimensional scaling (MDS) plots are excellent for visualising data, and are usually some of the first plots that should be made when exploring the data. MDS plots are based on principal components analysis and are an unsupervised method for looking at the similarities and differences between the various samples. Samples that are more similar to each other should cluster together, and samples that are very different should be further apart on the plot. Dimension one (or principal component one) captures the greatest source of variation in the data, dimension two captures the second greatest source of variation in the data and so on. Colouring the data points or labels by known factors of interest can often highlight exactly what the greatest sources of variation are in the data. It is also possible to use MDS plots to decipher sample mix-ups.
+
+```{r data_exploration}
+
+data <- getM(mSetSq)  # Get methylation M values
+#png("./GSE188573/figures/MDS_PC1_PC2.png", width = 800, height = 400) 
+pal <- brewer.pal(8, "Dark2")  # Define color palette
+# Define shapes based on group#
+shapes <- ifelse(targets_good$Group == "COVID19", 16, 17)  # 16: circle, 17: triangle
+# Define colors based on group
+colors <- pal[factor(targets_good$Group)]
+# MDS Plot
+plotMDS(data, top=1000, gene.selection="common", col=colors, pch=shapes)
+legend("topright", legend=levels(factor(targets_good$Group)), 
+       col=pal, pch=c(16, 17), bg="white", cex=0.7, 
+       text.col=pal)
+#dev.off()
+```
+
+Examining the MDS plots for this dataset demonstrates that, as we especulated from the density plots there is not high variation between both groups. the PC1 and PC2 together only explains the 11% of variability in our datasets. In addition, many samples from both groups are overlapping, therefor the disease status is not a source of variability on the methylation status of those samples.
+
+## 6. Filtering
+
+Poor performing probes are generally filtered out prior to differential methylation analysis. As the signal from these probes is unreliable, by removing them we perform fewer statistical tests and thus incur a reduced multiple testing penalty. We filter out probes that have failed in one or more samples based on detection p-value.
+
+```{r filtering}
+
+# ensure probes are in the same order in the mSetSq and detP objects
+detP <- detP[match(featureNames(mSetSq),rownames(detP)),] 
+
+# remove any probes that have failed in one or more samples
+keep <- rowSums(detP < 0.01) == ncol(mSetSq) 
+table(keep) # there are 6849 to remove
+
+mSetSqFlt <- mSetSq[keep,]
+#mSetSqFlt
+
+# remove probes on the sex chromosomes
+annepic <-getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+
+keep <- !(featureNames(mSetSqFlt) %in% annepic$Name[annepic$chr %in% 
+                                                        c("chrX","chrY")])
+#table(keep)
+mSetSqFlt <- mSetSqFlt[keep,]
+# remove probes with SNPs at CpG site
+mSetSqFlt <- dropLociWithSnps(mSetSqFlt)
+mSetSqFlt
+
+```
+
+Once Once the data has been filtered and normalised, it is often useful to re-examine the MDS plots to see if the relationship between the samples has changed. 
+
+```{r mds_2}
+# MDS Plot
+data2 <- getM(mSetSqFlt)  # Get methylation M values
+
+#png("./GSE188573/figures/MDS_PC1_PC2_after_filtering.png", width = 800, height = 400) 
+pal <- brewer.pal(8, "Dark2")  # Define color palette
+# Define shapes based on group#
+shapes <- ifelse(targets_good$Group == "COVID19", 16, 17)  # 16: circle, 17: triangle
+plotMDS(data2, top=1000, gene.selection="common", col=colors, pch=shapes)
+legend("topright", legend=levels(factor(targets_good$Group)), 
+       col=pal, pch=c(16, 17), bg="white", cex=0.7, 
+       text.col=pal)
+#dev.off()
+```
+
+Now after filtering we can observe that the variability explained by the first component decreases a little.
+
+The next step is to calculate M-values and beta values.M-values have nicer statistical properties and are thus better for use in statistical analysis of methylation data and beta values are easy to interpret and are thus better for displaying data.
+
+```{r m_B_values}
+
+# calculate M-values for statistical analysis
+mVals <- getM(mSetSqFlt)
+head(mVals[,1:5])
+bVals <- getBeta(mSetSqFlt)
+head(bVals[,1:5])
+#plot m and b values
+png("./GSE188573/figures/m_and_b_density_.png", width = 800, height = 400) 
+par(mfrow=c(1,2))
+densityPlot(bVals, sampGroups=targets_good$Group, main="Beta values", 
+            legend=FALSE, xlab="Beta values")
+legend("top", legend = levels(factor(targets_good$Group)), 
+       text.col=brewer.pal(8,"Dark2"))
+densityPlot(mVals, sampGroups=targets_good$Group, main="M-values", 
+            legend=FALSE, xlab="M values")
+legend("topleft", legend = levels(factor(targets_good$Group)), 
+       text.col=brewer.pal(8,"Dark2"))
+dev.off()
+```
+## 7. Probe-wise differential methylation analysis
+
+```{r dma}
+#changing nomenclature in group to avoid conflicts with the
+targets_good$Group <- gsub("Healthy Donor", "HD", targets_good$Group)
+
+# this is the factor of interest
+status <- factor(targets_good$Group)
+
+# use the above to create a design matrix
+design <- model.matrix(~0+status, data=targets_good)
+colnames(design) <- c(levels(status))
+ 
+# fit the linear model 
+fit <- lmFit(mVals, design)
+# create a contrast matrix for specific comparisons
+contMatrix <- makeContrasts(COVID19-HD,
+                           levels=design)
+#contMatrix
+
+fit2 <- contrasts.fit(fit, contMatrix)
+fit2 <- eBayes(fit2)
+
+# look at the numbers of DM CpGs at FDR < 0.05
+summary(decideTests(fit2))
+
+# get the table of results for the contrast COVID19 - HD
+annepicSub <- annepic[match(rownames(mVals),annepic$Name),
+                      c(1:4,12:19,24:ncol(annepic))]
+DMPs <- topTable(fit2, num=Inf, coef=1, genelist=annepicSub)
+head(DMPs)
+
+#save results
+write.table(DMPs, file="./GSE188573/DMPs_GSE188573.csv", sep=",", row.names=FALSE)
+
+# plot the top 4 most significantly differentially methylated CpGs 
+#png("./GSE188573/figures/Top_CpGs.png", width = 800, height = 400) 
+par(mfrow=c(2,2))
+sapply(rownames(DMPs)[1:4], function(cpg){
+  plotCpg(bVals, cpg=cpg, pheno=targets_good$Group, ylab = "Beta values")
+})
+#dev.off()
+
+```
+From the previous plots of sample-wise methylation levels for the top differentially methylated CpG we can confirm that in general there is not a strong difference in the methylation status of covid19 or healthy controls. We have even CpGs with "not resolved" methylation, for instance those where the B value is around 0.5 we are not sure if considering them as methylated or unmethylated. That is why the individual methylation status is not enough informative of differences and we should look for differentially methylated regions. 
+ 
+## 8. Differential Methylation analysis of regions
+
+``` {r dmr}
+#annotation of M-values matrix
+myAnnotation <- cpg.annotate(object = mVals, datatype = "array", what = "M", 
+                             analysis.type = "differential", design = design, 
+                             contrasts = TRUE, cont.matrix = contMatrix, 
+                             coef = "COVID19 - HD", arraytype = "EPIC")
+
+str(myAnnotation)
+
+DMRs <- dmrcate(myAnnotation, lambda=1000, C=2)
+#results.ranges <- extractRanges(DMRs)
+#results.ranges
+
+##Ploting the results
+
+# set up the grouping variables and colours
+#groups <- pal[1:length(unique(targets_good$SGroup))]
+#names(groups) <- levels(factor(targets_good$Group))
+#cols <- groups[as.character(factor(targets_good$Group))]
+
+# draw the plot for the top DMR
+#png("./GSE188573/figures/topDMRs_.png", width = 800, height = 400) 
+#par(mfrow=c(1,1))
+
+#DMR.plot(ranges = results.ranges, dmr = 2, CpGs = bVals, phen.col = cols, 
+        # what = "Beta", arraytype = "EPIC", genome = "hg19")
+
+#dev.off()
+```
+## 9. Conclusion
+
+In this tutorial, we have explored a comprehensive workflow for analyzing DNA methylation data using Bioconductor's robust set of packages. Starting with raw data processing and quality control, we employed minfi and other associated packages to preprocess IDAT files from Illumina's methylation arrays, ensuring high-quality data for downstream analysis. By normalizing the data and conducting quality assessments, we correct and adjusted the datasets for an accurate interpretation, then we detected differentially methylated positions (DMPs) and regions (DMRs) which are crucial for understanding epigenetic modifications that may contribute to COVID19 physiopathology.This tutorial not only provided a technical guide through the necessary steps of methylation data analysis but also highlighted the importance of rigorous data handling, appropriate statistical analysis, and the biological interpretation of methylation data.
+
+## References
+
+Godoy-Tena, G., Barmada, A., Morante-Palacios, O., de la Calle-Fabregat, C., Martins-Ferreira, R., Ferreté-Bonastre, A. G., Ciudad, L., Ruiz-Sanmartín, A., Martínez-Gallo, M., Ferrer, R., Ruiz-Rodriguez, J. C., Rodríguez-Ubreva, J., Vento-Tormo, R., & Ballestar, E. (2022). Epigenetic and transcriptomic reprogramming in monocytes of severe COVID-19 patients reflects alterations in myeloid differentiation and the influence of inflammatory cytokines. Genome medicine, 14(1), 134. https://doi.org/10.1186/s13073-022-01137-4
+
+Jovana Maksimovic, Belinda Phipson and Alicia Oshlack. A cross-package Bioconductor workflow for analysing methylation array data. Retrieve on April 2024 from: https://www.bioconductor.org/packages/devel/workflows/vignettes/methylationArrayAnalysis/inst/doc/methylationArrayAnalysis.html

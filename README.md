@@ -47,3 +47,26 @@ Main documents
     Presenattion: https://docs.google.com/presentation/d/1wu0FdKz1b07nqBcYM3OCjvaL-UB4x8ok6Q_A2G8HL4U/edit?usp=sharing
     
     Github Nextflow Pipeline: https://github.com/rund0wn/WGS    
+
+
+## Understanding Kraken Output for Metagenomic Classification
+
+**Table: Kraken Output Data**
+
+| Status | Contig ID    | Best Taxonomic Match | Length | K-mer Matches |
+|--------|--------------|----------------------|--------|---------------|
+| U      | 1Dr2_1126348 | 0                    | 649    | 0:615         |
+| C      | 1Dr2_1480339 | 2653852              | 682    | 0:26, 1495638:2, 0:211, 2897342:1, 0:100, 2653852:3, 0:305 |
+| C      | 1Dr2_804538  | 1793                 | 764    | 1760:3, 0:21, 1866885:2, 0:1, 1866885:2, 212767:5, 0:4, 1793:2, 0:44, 1762:1, 0:5, 1760:3, 1762:13, 2867005:5, 1762:4, 0:2, 1760:3, 0:10, 1760:1, 0:1, 1760:3, 1270:2, 0:7, 2736640:8, 0:91 |
+| C      | 1Dr2_160910  | 2                    | 816    | 0:175, 1771309:5, 0:114, 46165:4, 0:210, 28095:5, 0:7, 2997333:5, 0:27, 85023:5, 0:225 |
+| C      | 1Dr2_901081  | 1866885              | 511    | 1866885:2, 0:5, 1866885:3, 2:3, 216929:5, 1431246:5, 2594265:5, 1760:1, 2675524:7, 0:1, 28209:2, 0:11, 407:4, 0:5, 479432:1, 0:26, 1866885:5, 0:7, 2736640:6, 1268:2, 0:3 |
+
+**Explanation:**
+
+- **Status (C/U)**: Indicates whether the sequence was 'C'lassified or 'U'nclassified.
+- **Contig ID**: Unique identifier for each sequence analyzed.
+- **Best Taxonomic Match**: NCBI taxonomy ID that best matches the sequence based on k-mer analysis.
+- **Length**: Length of the sequence in base pairs.
+- **K-mer Matches**: Lists the taxonomy IDs and the count of matching k-mers. The '0' ID represents unclassified k-mers.
+
+This table and accompanying details provide a comprehensive view of how Kraken classifies sequences from metagenomic data. Each sequence is broken down by its matches to specific taxonomic IDs, highlighting the diversity and composition of microbial life in the sample.

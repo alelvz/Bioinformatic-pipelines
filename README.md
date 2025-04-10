@@ -48,24 +48,3 @@ Main documents
     
     Github Nextflow Pipeline: https://github.com/rund0wn/WGS    
 
-
-## Understanding Kraken Output for Metagenomic Classification
-
-**Kraken Output Data**
-
-| Status | Contig ID    | Best Taxonomic Match | Length | K-mer Matches |
-|--------|--------------|----------------------|--------|---------------|
-| U      | 1Dr2_1126348 | 0                    | 649    | 0:615     |
-| C      | 1Dr2_1480339 | 2653852              | 682    | 0:26, 1495638:2, 0:211, 2653852:3 |
-| C      | 1Dr2_804538  | 1793                 | 764    | 1760:3, 0:21, 1866885:2, 1793:2 |
-| C      | 1Dr2_901081  | 1866885              | 511    | 1866885:2, 0:5, 1866885:3, 1431246:5 |
-
-**Explanation:**
-
-- **Status (C/U)**: Indicates whether the sequence was 'C'lassified or 'U'nclassified.
-- **Contig ID**: Unique identifier for each sequence analyzed.
-- **Best Taxonomic Match**: NCBI taxonomy ID that best matches the sequence based on k-mer analysis.
-- **Length**: Length of the sequence in base pairs.
-- **K-mer Matches**: Lists the taxonomy IDs and the count of matching k-mers. The '0' ID represents unclassified k-mers.
-
-This table and accompanying details provide a comprehensive view of how Kraken classifies sequences from metagenomic data. Each sequence is broken down by its matches to specific taxonomic IDs, highlighting the diversity and composition of microbial life in the sample.
